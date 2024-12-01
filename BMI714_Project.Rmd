@@ -1,0 +1,177 @@
+---
+title: "BMI 714 Project"
+author: "Harry Li, Stephanie Chen"
+date: "`r Sys.Date()`"
+output:
+  html_document: 
+    toc: true
+    toc_depth: 3
+    toc_float: true
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::knit_engines$set(txt = function(options) {
+  code <- paste(options$code, collapse = "\n")
+  knitr::engine_output(options, code, NULL)
+})
+```
+
+## libraries
+
+```{r}
+#install.packages('MASS') #run if not installed
+library(ggplot2)
+library(ggrepel)
+library(ggpubr)
+library(glmnet)
+library(tidyverse)
+```
+
+## EDA
+
+```{r}
+var_lib <- read.csv('BMI714_NHANES_VariableDictionary.csv')
+nhanes_2020 <- read.csv("BMI714_NHANES2020_Data.csv")
+
+# okay, 1500+ variables
+#head(nhanes_2020)
+
+# the meta groups that exist within variables, I'm interested in laboratory
+table(var_lib$Component)
+```
+
+
+### How do each lab variable correlate with each other?
+
+```{r}
+## first subset main dataframe to just lab variables
+lab_var <- var_lib%>%
+  filter(Component == "Laboratory")%>%
+  pull(BMI_714_Variable_Name)
+
+nhanes_lab <- nhanes_2020%>%
+  select(lab_var)
+
+#head(nhanes_lab)
+```
+
+Seems like there's a lot of NAs, let's see how bad it is
+
+```{r}
+# there exists no patient that did all 438 lab tests, so let's find a subset of lab vars for which we have a good size of patients 
+#drop_na(nhanes_lab)
+
+# first let's see how many NA's each variable has
+n_patients <- nrow(nhanes_lab)
+
+na_prop_list <- c()
+for (i in 1:ncol(nhanes_lab)) {
+  curr_prop <- sum(is.na(nhanes_lab[,i]))/n_patients
+  na_prop_list[i] <- curr_prop
+}
+names(na_prop_list) <- colnames(nhanes_lab)
+
+hist(na_prop_list)
+# so a majority of the lab vars contain ~0.8 NA's
+
+# let's set 0.5 as an NA threshold for subsetting lab variables, 
+# with the hope that the leftover lab vars will yield a non-zero patient cohort
+low_na_vars <- names(na_prop_list[na_prop_list<0.5])
+length(low_na_vars)
+nrow(nhanes_lab%>%select(low_na_vars)%>%drop_na())
+```
+
+We saw that each of the lab variables have differing rate of NAs. 
+
+  *sanity check*: if a variable A has 0.5 NA rate, then that means half of the total 15560 patients will have an NA for that variable. Our goal is to find a subset of patients and a set of variables for which there exists no NAs. If we introduce some variable B also with 0.5 NA rate and we find the patients that have no NA for either variable, we should expect a result size of less than half of 15560 because it's not necessarily true that everyone who tested for var A also tested for var B (we can sure hope).
+  
+Thus, we have that 1) the lower the NA rate threshold, the less resulting variable subset, 2) the less resuling variable subset, the more patients will be leftover at the end. (consider the base case where only the lab var with NA rate of 0.00001 is left, which means almost all 15560 patients will be selected)
+
+If we look at only the variables with at most 0.5 NA rate, we end up with ~5000 patients. Let's see if we can do better, our goal is to maximize the size of subsetted variables while having the most patients we can work with. 
+
+```{r}
+# set threshold value from 0.01 to 0.50, expect more consensus patient as threshold decrease
+consensus_patient_n <- c()
+filtered_var_n <- c()
+i <- 1
+for (t in seq(0.01, 0.5, by = 0.01)) {
+  low_na_vars <- names(na_prop_list[na_prop_list<t])
+  filtered_var_n[i] <- length(low_na_vars)
+  consensus_patient_n[i] <- nrow(nhanes_lab%>%select(low_na_vars)%>%drop_na())
+  i <- i + 1
+}
+names(consensus_patient_n) <- seq(0.01, 0.5, by = 0.01)
+names(filtered_var_n) <- seq(0.01, 0.5, by = 0.01)
+
+# aggregate results in dataframe for plotting
+results_df <- data.frame(
+  Threshold = seq(0.01, 0.5, by = 0.01),
+  Consensus_Patients = consensus_patient_n,
+  Filtered_Variables = filtered_var_n
+)
+
+
+# the lower the threshold the more patients
+ggplot(results_df, aes(x = Threshold, y = Consensus_Patients)) +
+  geom_line() +
+  geom_point() +
+  scale_x_reverse() + 
+  labs(
+    title = "Consensus Patients vs NA Threshold",
+    x = "NA Threshold (Reversed)",
+    y = "Number of Consensus Patients"
+  ) +
+  theme_minimal()
+
+# the lower the threshold the less variables
+ggplot(results_df, aes(x = Threshold, y = Filtered_Variables)) +
+  geom_line() +
+  geom_point() +
+  scale_x_reverse() + 
+  labs(
+    title = "Filtered Variables vs NA Threshold",
+    x = "NA Threshold (Reversed)",
+    y = "Number of Filtered Variables"
+  ) +
+  theme_minimal()
+
+# post hoc
+label_point <- results_df[results_df$Threshold == 0.31, ]
+
+# the more variable the less consensus patients 
+ggplot(results_df, aes(x = Filtered_Variables, y = Consensus_Patients)) +
+  geom_line() +
+  geom_point() +
+  geom_text_repel(
+    data = label_point,
+    aes(label = paste("NA rate =", Threshold, "\n Filtered Variables # =", Filtered_Variables, "\n Patient # =", Consensus_Patients)),
+    nudge_x = 30,  # Nudges the label to the right
+    nudge_y = 1000, # Nudges the label upwards
+    segment.color = "blue", # Line color
+    segment.size = 0.5,     # Line thickness
+    color = "blue",         # Label text color
+    box.padding = 0.5,      # Space around the text
+    point.padding = 0.5     # Space around the point
+  ) +
+  labs(
+    title = "Number of Consensus Patients vs Number of Filtered Variables",
+    x = "Number of Filtered Variables",
+    y = "Number of Consensus Patients"
+  ) +
+  theme_minimal()
+```
+
+By elbow rule, we pick NA rate to be 0.31, and continue with the leftover data subset.
+
+```{r}
+selected_vars <- names(na_prop_list[na_prop_list<0.31])
+nhane_sub <- nhanes_lab%>%select(selected_vars)%>%drop_na()
+summary(nhane_sub)
+
+# what are these lab values actually corresponding to?
+table(var_lib%>%filter(BMI_714_Variable_Name %in% colnames(nhane_sub))%>%pull(Data_File_Description))
+
+
+```
