@@ -21,12 +21,17 @@ knitr::knit_engines$set(txt = function(options) {
 ## libraries
 
 ```{r}
-#install.packages('MASS') #run if not installed
 library(ggplot2)
 library(ggrepel)
 library(ggpubr)
 library(glmnet)
 library(tidyverse)
+library(reshape2)
+library(pheatmap)
+library(RColorBrewer)
+
+plot.out.dir <- file.path(getwd(), "plots") 
+colset <- colorRampPalette(rev(brewer.pal(n=7, name = "RdYlBu")))(100)
 ```
 
 ## EDA
@@ -173,5 +178,20 @@ summary(nhane_sub)
 # what are these lab values actually corresponding to?
 table(var_lib%>%filter(BMI_714_Variable_Name %in% colnames(nhane_sub))%>%pull(Data_File_Description))
 
+
+# large scale correlation check by heatmap
+## but first drop two columns that have 0 standard deviation -- the values were probably all 0 anyways
+pdf(paste0(plot.out.dir, "/correlation_subsetted_labvar.pdf"), width = 25, height = 25)
+nhane_sub <- nhane_sub[, apply(nhane_sub, 2, sd) != 0]
+cor_matrix <- cor(nhane_sub, use = "complete.obs", method = "pearson")
+sub_anno <- var_lib%>%
+  filter(BMI_714_Variable_Name %in% colnames(nhane_sub))%>%
+  select(BMI_714_Variable_Name, Data_File_Description)
+cor_matrix_ordered <- cor_matrix[,sub_anno$BMI_714_Variable_Name]
+p <- pheatmap(cor_matrix_ordered, 
+         color = colorRampPalette(brewer.pal(n = 11, name = "Spectral"))(50),
+         display_numbers = F, cluster_rows = F, cluster_cols = F)
+print(p)
+dev.off
 
 ```
