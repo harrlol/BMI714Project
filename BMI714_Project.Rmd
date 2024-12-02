@@ -48,7 +48,7 @@ table(var_lib$Component)
 ```
 
 
-### How do each lab variable correlate with each other?
+### Dealing with NAs
 
 ```{r}
 ## first subset main dataframe to just lab variables
@@ -128,7 +128,7 @@ ggplot(results_df, aes(x = Threshold, y = Consensus_Patients)) +
     x = "NA Threshold (Reversed)",
     y = "Number of Consensus Patients"
   ) +
-  theme_minimal()
+  theme_classic()
 
 # the lower the threshold the less variables
 ggplot(results_df, aes(x = Threshold, y = Filtered_Variables)) +
@@ -140,20 +140,21 @@ ggplot(results_df, aes(x = Threshold, y = Filtered_Variables)) +
     x = "NA Threshold (Reversed)",
     y = "Number of Filtered Variables"
   ) +
-  theme_minimal()
+  theme_classic()
 
 # post hoc
 label_point <- results_df[results_df$Threshold == 0.31, ]
 
 # the more variable the less consensus patients 
-ggplot(results_df, aes(x = Filtered_Variables, y = Consensus_Patients)) +
+pdf(paste0(plot.out.dir, "/na_handling.pdf"), width = 5, height = 4)
+p <- ggplot(results_df, aes(x = Filtered_Variables, y = Consensus_Patients)) +
   geom_line() +
   geom_point() +
   geom_text_repel(
     data = label_point,
     aes(label = paste("NA rate =", Threshold, "\n Filtered Variables # =", Filtered_Variables, "\n Patient # =", Consensus_Patients)),
     nudge_x = 30,  # Nudges the label to the right
-    nudge_y = 1000, # Nudges the label upwards
+    nudge_y = 2000, # Nudges the label upwards
     segment.color = "blue", # Line color
     segment.size = 0.5,     # Line thickness
     color = "blue",         # Label text color
@@ -161,23 +162,26 @@ ggplot(results_df, aes(x = Filtered_Variables, y = Consensus_Patients)) +
     point.padding = 0.5     # Space around the point
   ) +
   labs(
-    title = "Number of Consensus Patients vs Number of Filtered Variables",
+    title = "Figure 1: Number of Consensus \nPatients vs Number of Filtered Variables",
     x = "Number of Filtered Variables",
     y = "Number of Consensus Patients"
   ) +
-  theme_minimal()
+  theme_classic()
+print(p)
+dev.off()
 ```
 
 By elbow rule, we pick NA rate to be 0.31, and continue with the leftover data subset.
 
+### How do the selected lab variables correlate with one another?
+
 ```{r}
 selected_vars <- names(na_prop_list[na_prop_list<0.31])
 nhane_sub <- nhanes_lab%>%select(selected_vars)%>%drop_na()
-summary(nhane_sub)
+# summary(nhane_sub)
 
 # what are these lab values actually corresponding to?
 table(var_lib%>%filter(BMI_714_Variable_Name %in% colnames(nhane_sub))%>%pull(Data_File_Description))
-
 
 # large scale correlation check by heatmap
 ## but first drop two columns that have 0 standard deviation -- the values were probably all 0 anyways
@@ -192,6 +196,10 @@ p <- pheatmap(cor_matrix_ordered,
          color = colorRampPalette(brewer.pal(n = 11, name = "Spectral"))(50),
          display_numbers = F, cluster_rows = F, cluster_cols = F)
 print(p)
-dev.off
-
+dev.off()
 ```
+Seems like variables within "Complete Blood Count with 5-Part Differential in Whole Blood" and "Cotinine and Hydroxycotinine - Serum" have some strong covariance within the group. Across groups, we see 1) some correlation between some CBC tests and PBCD tests, 2) slight correlation between some PBCD items and HEPB, HEPC, HEPE measurements, 3) notable correlation between blood mercury (P_PBCD_LBXTHG, P_PBCD_LBDTHGSI, P_PBCD_LBDTHGLC) and mercury level in the IHGEM tests...(yeah no sh*t), 4) slight correlation between blood selenium, blood manganese levels and hemoglobin/red cell/platlet measurements
+
+With that, we focus on observation 2), and aim to construct a regression model that can best predict Hepatitis B core antibody (P_HEPBD_LBXHBC) from "Lead, Cadmium, Total Mercury, Selenium, & Manganese - Blood (PBCD)" family of tests
+
+
