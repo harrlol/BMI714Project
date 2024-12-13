@@ -210,7 +210,7 @@ With that, we focus on observation 2), and aim to construct a regression model t
 # hep_vars <- intersect(var_lib$BMI_714_Variable_Name[grep("P_HEP", var_lib$Data_File_Name)], colnames(nhane_sub))
 hep_vars <- "P_HEPBD_LBXHBC"
 analysis_ind_var_vec <- c("P_PBCD_LBDBPBSI", "P_PBCD_LBDBCDSI", "P_PBCD_LBDTHGSI", "P_PBCD_LBDBSESI", "P_PBCD_LBDBMNSI", "P_CBC_LBXHCT", "P_CBC_LBXMCVSI", "P_CBC_LBXHGB")
-analysis_var_ref <- var_lib%>%filter(BMI_714_Variable_Name %in% c(hep_vars, analysis_var_vec))
+analysis_var_ref <- var_lib%>%filter(BMI_714_Variable_Name %in% c(hep_vars, analysis_ind_var_vec))
 # subset the data to only include the variables of interest
 nhane_working <- nhane_sub%>%
   select(all_of(c(hep_vars, analysis_ind_var_vec)))
@@ -246,41 +246,70 @@ summary(fit_bk_aic)
 ```
 #### Approach 3: Iterative Evaluation
 
+Method taken from Aparna, pseudo code below:
+
+Let the set of predictor variables be $V$, 
+Construct a null model $M_0$
+Let $M_curr$ be $M_0$
+while $V$ is not empty
+  for each $v \in V$
+    fit a univariate model $M_{v}$ with $v$
+    run F test to compare $M_{v}$ to $M_{curr}$
+    record $v$ and the p value of the F test ($p_v$) for $M_v$ in a table
+    
+  if all $p_v$ > 0.05, stop
+  else
+    identify $v$ with $min(p_v)$
+    $M_curr$=$M_v$
+    $V$ = $V$ - $v$
+
 ```{r}
 # initialize model and variable set
 curr_ind_var_set <- analysis_ind_var_vec
 fit_iter <- fit_null
-end_metric <- 0
-while (end_metric < 1) {
+while (length(curr_ind_var_set) > 0) {
   # initiatlize var stat table
   var_sig <- data.frame()
-  for (var in curr_ind_var_set) {
-    # fit a model with one variable
-    formula_in <- as.formula(paste(deparse(formula(fit_iter)), "+", var))
+  for (ind_var in curr_ind_var_set) {
+    # create a formula with +1 variable
+    formula_in <- as.formula(paste(paste(deparse(formula(fit_iter)), collapse = ""), "+", ind_var))
     
     # fit the model
     fit <- glm(formula_in, data = nhane_working, family = binomial)
     
-    # get the AIC
-    curr_AIC <- AIC(fit)
+    # pulls out p value of this F-test
+    curr_p <- anova(fit_iter, fit)[[5]][2]
     
     # store the variable, p value, and AIC
-    var_sig <- rbind(var_sig, data.frame(var = var, p_val = summary(fit)$coefficients[2,4], AIC = curr_AIC))
-  
-    # best var by p value
-    best_var_p <- var_sig[var_sig$p_val == min(var_sig$p_val),]$var
-    
-    # best var by p value
-    best_var_AIC <- var_sig[var_sig$AIC == min(var_sig$AIC),]$var
+    var_sig <- rbind(var_sig, data.frame(var = ind_var, p_value = curr_p))
   }
   
-  fit_iter <- update(fit_iter, as.formula(paste(". ~ . +", best_var_AIC)))
+  if (all(var_sig$p_value > 0.05)) {
+    fit_out <- fit_iter
+    cat("Finished iterative variable selection, check fit_out for the final model")
+    break
+  }
   
-  # wait on Aparna on deciding this, some function on fit_iter
-  end_metric <- 
+  # best var by p value
+  best_var_p <- var_sig[var_sig$p_value == min(var_sig$p_value),]$var
+  fit_iter <- update(fit_iter, as.formula(paste(". ~ . +", best_var_p)))
+  curr_ind_var_set <- curr_ind_var_set[curr_ind_var_set != best_var_p]
+  
+  cat(paste(best_var_p, "added to the model\n"))
 }
-```
 
+summary(fit_out)
+```
+Now that we have the three models, let's compare
+
+```{r}
+#Backward Elimination with $\\beta_1$ significance level of 0.05
+fit1_1
+#Backward elimination with AIC
+fit_bk_aic
+#Iterative evaluation
+fit_out
+```
 
 
 
