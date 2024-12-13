@@ -20,11 +20,12 @@ knitr::knit_engines$set(txt = function(options) {
 
 ## libraries
 
-```{r}
+```{r, echo = FALSE}
 library(ggplot2)
 library(ggrepel)
 library(ggpubr)
 library(glmnet)
+library(data.table)
 library(tidyverse)
 library(reshape2)
 library(pheatmap)
@@ -36,17 +37,16 @@ colset <- colorRampPalette(rev(brewer.pal(n=7, name = "RdYlBu")))(100)
 
 ## EDA
 
+This includes NA handling and correlation check between selected lab variables.
+
 ```{r}
 var_lib <- read.csv('BMI714_NHANES_VariableDictionary.csv')
-nhanes_2020 <- read.csv("BMI714_NHANES2020_Data.csv")
-
-# okay, 1500+ variables
-#head(nhanes_2020)
+nhanes_2020 <- as.data.frame(fread("BMI714_NHANES2020_Data.csv", header = T, sep = ","))
+# nhanes_2020 <- read.csv("BMI714_NHANES2020_Data.csv")
 
 # the meta groups that exist within variables, I'm interested in laboratory
 table(var_lib$Component)
 ```
-
 
 ### Dealing with NAs
 
@@ -57,8 +57,7 @@ lab_var <- var_lib%>%
   pull(BMI_714_Variable_Name)
 
 nhanes_lab <- nhanes_2020%>%
-  select(lab_var)
-
+  select(all_of(lab_var))
 #head(nhanes_lab)
 ```
 
@@ -66,15 +65,16 @@ Seems like there's a lot of NAs, let's see how bad it is
 
 ```{r}
 # there exists no patient that did all 438 lab tests, so let's find a subset of lab vars for which we have a good size of patients 
-#drop_na(nhanes_lab)
+# drop_na(nhanes_lab)
 
 # first let's see how many NA's each variable has
 n_patients <- nrow(nhanes_lab)
 
+
+# I changed from using read.csv to fread for importing nhanes and the code below is not working can you help?
 na_prop_list <- c()
 for (i in 1:ncol(nhanes_lab)) {
-  curr_prop <- sum(is.na(nhanes_lab[,i]))/n_patients
-  na_prop_list[i] <- curr_prop
+  na_prop_list[i] <- sum(is.na(nhanes_lab[,i]))/n_patients
 }
 names(na_prop_list) <- colnames(nhanes_lab)
 
@@ -85,7 +85,7 @@ hist(na_prop_list)
 # with the hope that the leftover lab vars will yield a non-zero patient cohort
 low_na_vars <- names(na_prop_list[na_prop_list<0.5])
 length(low_na_vars)
-nrow(nhanes_lab%>%select(low_na_vars)%>%drop_na())
+nrow(nhanes_lab%>%select(all_of(low_na_vars))%>%drop_na())
 ```
 
 We saw that each of the lab variables have differing rate of NAs. 
@@ -115,7 +115,7 @@ results_df <- data.frame(
   Threshold = seq(0.01, 0.5, by = 0.01),
   Consensus_Patients = consensus_patient_n,
   Filtered_Variables = filtered_var_n
-)
+)%>%filter(Filtered_Variables > 0)
 
 
 # the lower the threshold the more patients
@@ -145,9 +145,11 @@ ggplot(results_df, aes(x = Threshold, y = Filtered_Variables)) +
 # post hoc
 label_point <- results_df[results_df$Threshold == 0.31, ]
 
+min(results_df$Filtered_Variables)
+
 # the more variable the less consensus patients 
-pdf(paste0(plot.out.dir, "/na_handling.pdf"), width = 5, height = 4)
-p <- ggplot(results_df, aes(x = Filtered_Variables, y = Consensus_Patients)) +
+# pdf(paste0(plot.out.dir, "/na_handling.pdf"), width = 5, height = 4)
+ggplot(results_df, aes(x = Filtered_Variables, y = Consensus_Patients)) +
   geom_line() +
   geom_point() +
   geom_text_repel(
@@ -167,13 +169,14 @@ p <- ggplot(results_df, aes(x = Filtered_Variables, y = Consensus_Patients)) +
     y = "Number of Consensus Patients"
   ) +
   theme_classic()
-print(p)
-dev.off()
+# dev.off()
 ```
 
 By elbow rule, we pick NA rate to be 0.31, and continue with the leftover data subset.
 
 ### How do the selected lab variables correlate with one another?
+
+We want to see what variables seem to group together, but also look at whether or not we see at least some correlation betwene our hypothesis group of variables (PBCD) and other groups of variables.
 
 ```{r}
 selected_vars <- names(na_prop_list[na_prop_list<0.31])
@@ -200,6 +203,84 @@ dev.off()
 ```
 Seems like variables within "Complete Blood Count with 5-Part Differential in Whole Blood" and "Cotinine and Hydroxycotinine - Serum" have some strong covariance within the group. Across groups, we see 1) some correlation between some CBC tests and PBCD tests, 2) slight correlation between some PBCD items and HEPB, HEPC, HEPE measurements, 3) notable correlation between blood mercury (P_PBCD_LBXTHG, P_PBCD_LBDTHGSI, P_PBCD_LBDTHGLC) and mercury level in the IHGEM tests...(yeah no sh*t), 4) slight correlation between blood selenium, blood manganese levels and hemoglobin/red cell/platlet measurements
 
-With that, we focus on observation 2), and aim to construct a regression model that can best predict Hepatitis B core antibody (P_HEPBD_LBXHBC) from "Lead, Cadmium, Total Mercury, Selenium, & Manganese - Blood (PBCD)" family of tests
+With that, we focus on observation 2), and aim to construct a regression model that can best predict Hepatitis B core antibody (P_HEPBD_LBXHBC) from "Lead, Cadmium, Total Mercury, Selenium, & Manganese - Blood (PBCD)" family of tests. Upon further inspection, we see that there is actually redundancy within the PBCD tests. For example, the three variables P_PBCD_LBXTHG, P_PBCD_LBDTHGSI, and P_PBCD_LBDTHGLC all measure blood mercury, the first in ug/L, second in nmol/L, and the third a code that defines whether or not the level is above some threshold level. We decide to keep only the variables that uses umol/L for the 5 heavy metal tests. To increase the scope of the variables arrive at 8 variables, we additionally include hematocrit (P_CBC_LBXHCT), mean cell volume (P_CBC_LBXMCVSI), and hemoglobin (P_CBC_LBXHGB). 
+
+```{r}
+# creating the dataset with the selected variables
+# hep_vars <- intersect(var_lib$BMI_714_Variable_Name[grep("P_HEP", var_lib$Data_File_Name)], colnames(nhane_sub))
+hep_vars <- "P_HEPBD_LBXHBC"
+analysis_ind_var_vec <- c("P_PBCD_LBDBPBSI", "P_PBCD_LBDBCDSI", "P_PBCD_LBDTHGSI", "P_PBCD_LBDBSESI", "P_PBCD_LBDBMNSI", "P_CBC_LBXHCT", "P_CBC_LBXMCVSI", "P_CBC_LBXHGB")
+analysis_var_ref <- var_lib%>%filter(BMI_714_Variable_Name %in% c(hep_vars, analysis_var_vec))
+# subset the data to only include the variables of interest
+nhane_working <- nhane_sub%>%
+  select(all_of(c(hep_vars, analysis_ind_var_vec)))
+nhane_working
+
+nhane_working$P_HEPBD_LBXHBC <- as.factor(nhane_working$P_HEPBD_LBXHBC)
+```
+
+## Model Building
+
+### Logistic Regression
+
+We have 8 continuous independent variables and 1 binary dependent variable. We will use logistic regression to predict the probability of having Hepatitis B core antibody based on the 8 blood test results. I am interested in investigating the performance and analyzing different approaches to feature selection. 
+
+#### Approach 1: Backward Elimination with $\\beta_1$ significance level of 0.05
+
+```{r}
+# fit a full model
+fit_full <- glm(P_HEPBD_LBXHBC ~ ., data = nhane_working, family = binomial)
+#summary(fit_full)   #P_PBCD_LBDBMNSI is not significant
+
+fit1_1 <- update(fit_full, . ~ . - P_PBCD_LBDBMNSI)
+summary(fit1_1)
+# all variables are p<0.05, we are done now
+```
+
+#### Approach 2: Backward Elimination with AIC
+
+```{r}
+fit_null <- glm(P_HEPBD_LBXHBC ~ 1, data = nhane_working, family = binomial)
+fit_bk_aic <- step(fit_full, scope = list(lower = fit_null, upper = fit_full), data = nhane_working, direction = "backward", trace = F, k = 2)
+summary(fit_bk_aic)
+```
+#### Approach 3: Iterative Evaluation
+
+```{r}
+# initialize model and variable set
+curr_ind_var_set <- analysis_ind_var_vec
+fit_iter <- fit_null
+end_metric <- 0
+while (end_metric < 1) {
+  # initiatlize var stat table
+  var_sig <- data.frame()
+  for (var in curr_ind_var_set) {
+    # fit a model with one variable
+    formula_in <- as.formula(paste(deparse(formula(fit_iter)), "+", var))
+    
+    # fit the model
+    fit <- glm(formula_in, data = nhane_working, family = binomial)
+    
+    # get the AIC
+    curr_AIC <- AIC(fit)
+    
+    # store the variable, p value, and AIC
+    var_sig <- rbind(var_sig, data.frame(var = var, p_val = summary(fit)$coefficients[2,4], AIC = curr_AIC))
+  
+    # best var by p value
+    best_var_p <- var_sig[var_sig$p_val == min(var_sig$p_val),]$var
+    
+    # best var by p value
+    best_var_AIC <- var_sig[var_sig$AIC == min(var_sig$AIC),]$var
+  }
+  
+  fit_iter <- update(fit_iter, as.formula(paste(". ~ . +", best_var_AIC)))
+  
+  # wait on Aparna on deciding this, some function on fit_iter
+  end_metric <- 
+}
+```
+
+
 
 
