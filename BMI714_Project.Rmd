@@ -28,12 +28,13 @@ library(glmnet)
 library(data.table)
 library(tidyverse)
 library(reshape2)
+library(boot)
 library(pheatmap)
 library(RColorBrewer)
 library(caret)
 library(pROC)
+library(progress)
 
-set.seed(714)
 plot.out.dir <- file.path(getwd(), "plots") 
 colset <- colorRampPalette(rev(brewer.pal(n=7, name = "RdYlBu")))(100)
 ```
@@ -179,7 +180,7 @@ By elbow rule, we pick NA rate to be 0.31, and continue with the leftover data s
 
 ### How do the selected lab variables correlate with one another?
 
-We want to see what variables seem to group together, but also look at whether or not we see at least some correlation betwene our hypothesis group of variables (PBCD) and other groups of variables.
+We want to see what variables seem to group together, but also look at whether or not we see at least some correlation between our hypothesis group of variables (PBCD) and other groups of variables.
 
 ```{r}
 selected_vars <- names(na_prop_list[na_prop_list<0.31])
@@ -187,11 +188,11 @@ nhane_sub <- nhanes_lab%>%select(selected_vars)%>%drop_na()
 # summary(nhane_sub)
 
 # what are these lab values actually corresponding to?
-table(var_lib%>%filter(BMI_714_Variable_Name %in% colnames(nhane_sub))%>%pull(Data_File_Description))
+# table(var_lib%>%filter(BMI_714_Variable_Name %in% colnames(nhane_sub))%>%pull(Data_File_Description))
 
 # large scale correlation check by heatmap
 ## but first drop two columns that have 0 standard deviation -- the values were probably all 0 anyways
-pdf(paste0(plot.out.dir, "/correlation_subsetted_labvar.pdf"), width = 25, height = 25)
+# pdf(paste0(plot.out.dir, "/correlation_subsetted_labvar.pdf"), width = 25, height = 25)
 nhane_sub <- nhane_sub[, apply(nhane_sub, 2, sd) != 0]
 cor_matrix <- cor(nhane_sub, use = "complete.obs", method = "pearson")
 sub_anno <- var_lib%>%
@@ -201,8 +202,8 @@ cor_matrix_ordered <- cor_matrix[,sub_anno$BMI_714_Variable_Name]
 p <- pheatmap(cor_matrix_ordered, 
          color = colorRampPalette(brewer.pal(n = 11, name = "Spectral"))(50),
          display_numbers = F, cluster_rows = F, cluster_cols = F)
-print(p)
-dev.off()
+p
+# dev.off()
 ```
 Seems like variables within "Complete Blood Count with 5-Part Differential in Whole Blood" and "Cotinine and Hydroxycotinine - Serum" have some strong covariance within the group. Across groups, we see 1) some correlation between some CBC tests and PBCD tests, 2) slight correlation between some PBCD items and HEPB, HEPC, HEPE measurements, 3) notable correlation between blood mercury (P_PBCD_LBXTHG, P_PBCD_LBDTHGSI, P_PBCD_LBDTHGLC) and mercury level in the IHGEM tests...(yeah no sh*t), 4) slight correlation between blood selenium, blood manganese levels and hemoglobin/red cell/platlet measurements
 
@@ -219,14 +220,26 @@ nhane_selected <- nhane_sub%>%
   select(all_of(c(hep_vars, analysis_ind_var_vec)))
 
 nhane_selected$P_HEPBD_LBXHBC <- as.factor(ifelse(nhane_selected$P_HEPBD_LBXHBC == 1, 0, 1))
-nhane_selected
+
+head(nhane_selected)
+
+cor(nhane_selected[, -1])
+plot(nhane_selected[, -1])
 
 # table(nhane_selected$P_HEPBD_LBXHBC)
+```
+
+### Scaling
+
+```{r}
+nhane_selected <- nhane_selected %>%
+  mutate(across(!matches("P_HEPBD_LBXHBC"), ~ (. - mean(.)) / sd(.)))
 ```
 
 ### Test-train split
 
 ```{r}
+set.seed(714)
 # since we have so many observations we can do 0.7 train prop (i'm so happy)
 train_prop <- 0.7
 
@@ -262,13 +275,13 @@ We have 8 continuous independent variables and 1 binary dependent variable. We w
 ```{r}
 # fit a full model
 fit_full <- glm(P_HEPBD_LBXHBC ~ ., data = nhane_train, family = binomial)
-#summary(fit_full)   #P_PBCD_LBDBMNSI is not significant
+# summary(fit_full)   #P_PBCD_LBDBMNSI is not significant
 
 fit1_1 <- update(fit_full, . ~ . - P_PBCD_LBDBMNSI)
-summary(fit1_1)
+# summary(fit1_1) #P_PBCD_LBDBSESI is not significant
 
-fit1_2 <- update(fit1_1, . ~ . - P_PBCD_LBDBSESI)
-summary(fit1_2)
+fit1 <- update(fit1_1, . ~ . - P_PBCD_LBDBSESI)
+summary(fit1)
 # all variables are p<0.05, we are done now
 ```
 
@@ -276,8 +289,8 @@ summary(fit1_2)
 
 ```{r}
 fit_null <- glm(P_HEPBD_LBXHBC ~ 1, data = nhane_train, family = binomial)
-fit_bk_aic <- step(fit_full, scope = list(lower = fit_null, upper = fit_full), data = nhane_train, direction = "backward", trace = F, k = 2)
-summary(fit_bk_aic)
+fit2 <- step(fit_full, scope = list(lower = fit_null, upper = fit_full), data = nhane_train, direction = "backward", trace = F, k = 2)
+summary(fit2)
 ```
 
 #### Approach 3: Iterative Evaluation
@@ -321,8 +334,9 @@ while (length(curr_ind_var_set) > 0) {
   }
   
   if (all(var_sig$p_value > 0.05)) {
-    fit_out <- fit_iter
-    cat("Finished iterative variable selection, check fit_out for the final model")
+    # if all p values are > 0.05, stop
+    fit3 <- fit_iter
+    cat("Finished iterative variable selection, check below for the summary of final model\n")
     break
   }
   
@@ -334,33 +348,46 @@ while (length(curr_ind_var_set) > 0) {
   cat(paste(best_var_p, "added to the model\n"))
 }
 
-summary(fit_out)
+summary(fit3)
 ```
+
+#### Quick comparison before moving forward
+
 Now that we have the three models, let's compare
 
 ```{r}
 #Backward Elimination with $\\beta_1$ significance level of 0.05
-summary(fit1_2)
+summary(fit1)
 #Backward elimination with AIC
-summary(fit_bk_aic)
+summary(fit2)
 #Iterative evaluation
-summary(fit_out)
+summary(fit3)
 ```
 
+Approach 1 and approach 2 agrees, while approach 3 included only 4 of the 5 heavy metal tests. We will now compare the three models using ANOVA and AIC.
+
+We note fit3 is strictly nested within fit1(=fit2). We will do an F test on the two models, and compare AIC scores.
 
 ```{r}
-#run anova to determine if including P_PBCD_LBDBSESI leads to 
-anova(fit_out, fit_bk_aic)
-AIC(fit_out)
-AIC(fit_bk_aic)
+# fit3 has fewest variables, let's see if adding the dropped variable improves the model
+anova(fit3, fit1)
+AIC(fit3, fit1)
 ```
 
-Given that the p-value is > 0.05, this means that adding variable P_PBCD_LBDBSESI to the model does not explain significantly more of the unexplained variation compared to the model generated by iterative evaluation. We ran AIC between the two potential models and found that the difference in AIC score was not >=5 points, so we are not able to conclude that the model improves enough to warrant increasing its complexity. Based on these two test metrics, we decide to utilize the model with less variables for ridge regularization, which is fit_out.
+Adding P_CBC_LBXHCT and P_CBC_LBXHGB to fit3 does indeed significantly explain more variance in the data, fit1 also is ~30 AIC scores lower than fit3. Both evidence points to fit1 being the more statistically robust model, thus we will proceed with fit1. As a reminder, during this variable selection, we dropped P_PBCD_LBDBSESI and P_PBCD_LBDBMNSI as they did not prove to be statistically significant enough to explain the variance in the data. 
+
+```{r}
+# rational var naming
+fit_logi <- fit1# fit1 is the best model
+```
+
+#### Ridge Regression
+
+We will now perform ridge regression on the selected variables to see if we can improve the model and prevent overfitting. We will examine whether or not ridge indeed lives up to its promise. We will use cross-validation to find the best lambda value.
 
 ```{r}
 # Ridge regularization because want to retain all covariates
-
-#remove the variables that were dropped during variable selection
+# remove the variables that were dropped during variable selection
 nhane_train_ridge <- nhane_train%>%
   select(-c(P_PBCD_LBDBSESI, P_PBCD_LBDBMNSI))
 nhane_test_ridge <- nhane_test%>%
@@ -369,10 +396,11 @@ nhane_test_ridge <- nhane_test%>%
 nhanes_matrix <- apply(nhane_train_ridge, 2, as.numeric)
 
 #set alpha to 0 for ridge
+set.seed(714)
 nhanes_model_ridge <- cv.glmnet(nhanes_matrix[,!colnames(nhanes_matrix) %in% "P_HEPBD_LBXHBC"], nhanes_matrix[,"P_HEPBD_LBXHBC"], nfolds = 10, alpha = 0)
 best_lambda <- nhanes_model_ridge$lambda.min
-nhanes_final <- glmnet(nhanes_matrix[,!colnames(nhanes_matrix) %in% "P_HEPBD_LBXHBC"], nhanes_matrix[,"P_HEPBD_LBXHBC"], alpha = 0, lambda=best_lambda)
-ridge_coefficients<- coef(nhanes_final)
+fit_ridge <- glmnet(nhanes_matrix[,!colnames(nhanes_matrix) %in% "P_HEPBD_LBXHBC"], nhanes_matrix[,"P_HEPBD_LBXHBC"], alpha = 0, lambda=best_lambda)
+ridge_coefficients<- coef(fit_ridge)
 ridge_coefficients_vector <- as.vector(ridge_coefficients)
 names(ridge_coefficients_vector) <- rownames(ridge_coefficients)
 ```
@@ -382,14 +410,14 @@ We now compare the coefficients from the ridge regularization to the coefficient
 ```{r}
 comparison_df <- data.frame( 
   Ridge = ridge_coefficients_vector,  
-  Standard = fit_out$coefficients[names(ridge_coefficients_vector)] 
+  Standard = fit_logi$coefficients[names(ridge_coefficients_vector)] 
 )
 comparison_df
 ```
 
 ```{r}
 # model eval with regular logistic regression
-predicted_probs <- predict(fit_out, newdata = nhane_test, type = "response")
+predicted_probs <- predict(fit_logi, newdata = nhane_test, type = "response")
 predicted_classes <- ifelse(predicted_probs > 0.5, 1, 0)
 # table(predicted_classes)
 actual_classes <- nhane_test[, "P_HEPBD_LBXHBC"]
@@ -398,7 +426,7 @@ confusion_matrix_logi <- table(Predicted = predicted_classes, Actual = actual_cl
 roc_logi <- roc(actual_classes, predicted_probs, plot = T, print.auc = T, main = "ROC Curve for Logistic Regression")
 
 # model eval with ridge
-predicted_probs <- predict(nhanes_final, newx = as.matrix(nhane_test_ridge[, !colnames(nhane_test_ridge) %in% "P_HEPBD_LBXHBC"]), s = "lambda.min", type = "response")
+predicted_probs <- predict(fit_ridge, newx = as.matrix(nhane_test_ridge[, !colnames(nhane_test_ridge) %in% "P_HEPBD_LBXHBC"]), s = "lambda.min", type = "response")
 predicted_classes <- ifelse(predicted_probs > 0.5, 1, 0)
 # table(predicted_classes)
 actual_classes <- nhane_test_ridge[, "P_HEPBD_LBXHBC"]
@@ -444,11 +472,123 @@ evaluation_df <- data.frame(
 )
 
 evaluation_df
+
+```
+## Model Diagnostics
+
+### Bootstrapping for CI
+
+First define a function that takes in a model and outputs coefficients as required by boot. This performs 1000 bootstrapping to generate a distribution (and therefore 95 CI) for each coefficient. We use the training set instead of the whole dataset because the model that we want to diagnose is built on training data so bootstrapping using it mirrors this process and helps validate its stability. 
+
+```{r}
+# create the data pool for bootstrapping
+bs_dat <- nhane_train%>%
+  select(-c(P_PBCD_LBDBSESI, P_PBCD_LBDBMNSI))
+
+x <- model.matrix(P_HEPBD_LBXHBC ~ ., data = bs_dat)[, -1]
+y <- as.numeric(bs_dat$P_HEPBD_LBXHBC) - 1
+
+pb <- progress_bar$new(total = 1001)
+# ridge regression bootstrapping function
+ridge_boot_fn <- function(in_dat, idx) {
+  pb$tick()  
+  # get the bootstrap sample
+  x_boot <- in_dat[idx, 2:7]
+  y_boot <- in_dat[idx, 1]
+  
+  # edge case where y is all the same
+  if (length(unique(y_boot)) == 1) {
+    cat("all y are same level")
+    return(rep(NA, ncol(x_boot) + 1))  # Return NA coefficients for this sample
+  }
+  
+  # fit ridge, I know finding best lambda for each boot is time consuming
+  # it's not too bad (~1 min) so we'll go for that accuracy
+  pre_cv <- cv.glmnet(x_boot, y_boot, nfolds = 10, alpha = 0)
+  best_lambda <- pre_cv$lambda.min
+  fit_ridge <- glmnet(x_boot, y_boot, alpha = 0, lambda=best_lambda)
+  
+  # get coefficients
+  return(as.numeric(coef(fit_ridge)))
+}
+
+# perform boot
+data_list <- list(x = x, y = y)
+set.seed(714)
+ridge_boot_results <- boot(
+  data = cbind(y,x), 
+  statistic = ridge_boot_fn, 
+  R = 1000
+)
+
+ridge_boot_results
 ```
 
+### Permutation to Check Calibration
 
+Now let's do 1000 permutation and look at the null distribution of the coefficients and the distribution p values. Again, we use training set as the base to ensure consistency. 
 
+```{r}
+x <- nhanes_matrix[,!colnames(nhanes_matrix) %in% "P_HEPBD_LBXHBC"]
+y <- nhanes_matrix[,"P_HEPBD_LBXHBC"]
 
+set.seed(714)
+# first calculate original model performance, note this is not on test set
+original_model <- cv.glmnet(x, y, alpha = 0, nfolds = 10)
+original_lambda <- original_model$lambda.min
+original_fit <- glmnet(x, y, alpha = 0, lambda = original_lambda)
+coef(fit_ridge)
 
+original_coefs <- as.numeric(coef(original_fit))  # Include intercept
+coef_names <- rownames(coef(original_fit))
 
-## 
+# we now calculate performance for each permutation
+set.seed(714)
+n_perm <- 1000
+perm_coefs <- matrix(NA, nrow = n_perm, ncol = length(original_coefs))
+perm_p_val <- matrix(NA, nrow = n_perm, ncol = length(original_coefs))
+
+pb <- progress_bar$new(total = 1001)
+for (i in 1:n_perm) {
+  pb$tick()
+  # Permute y
+  y_permuted <- sample(y)
+  
+  # ridge for coefficient
+  permuted_model <- cv.glmnet(x, y_permuted, alpha = 0, nfolds = 10)
+  permuted_lambda <- permuted_model$lambda.min
+  permuted_fit <- glmnet(x, y_permuted, alpha = 0, lambda = permuted_lambda)
+  perm_coefs[i, ] <- as.numeric(coef(permuted_fit))
+  
+  # regular glm for p value
+  glm_fit <- glm(y_permuted ~ x, family = "binomial")
+  
+  glm_summary <- summary(glm_fit)
+  perm_p_val[i, ] <- as.numeric(glm_summary$coefficients[, 4])
+}
+coef_names <- c("(Intercept)", colnames(x))
+
+# coefficient tbl and histogram
+coef_value_tbl <- data.frame(Permutation = 1:n_perm, perm_coefs)
+colnames(coef_value_tbl) <- c("Permutation", coef_names)
+for (i in 1:length(coef_names)) {
+  hist(
+    coef_value_tbl[, i], 
+    main = paste("Distribution of Coefficient for ", coef_names[i], " Under Permutation"), 
+    xlab = "Coefficient Value", 
+    col = "lightblue"
+  )
+}
+
+# p value tbl and histogram
+p_value_tbl <- data.frame(Permutation = 1:n_perm, perm_p_val)
+colnames(p_value_tbl) <- c("Permutation", coef_names)
+for (i in 1:length(coef_names)) {
+  hist(
+    p_value_tbl[, i], 
+    main = paste("Distribution of P Value for ", coef_names[i], " Under Permutation"), 
+    xlab = "P Value", 
+    col = "lightblue"
+  )
+}
+```
