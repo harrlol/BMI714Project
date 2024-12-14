@@ -20,11 +20,6 @@ knitr::knit_engines$set(txt = function(options) {
 
 ## libraries
 
-```{r}
-install.packages("ggpubr")
-```
-
-
 ```{r, echo = FALSE}
 library(ggplot2)
 library(ggrepel)
@@ -35,7 +30,10 @@ library(tidyverse)
 library(reshape2)
 library(pheatmap)
 library(RColorBrewer)
+library(caret)
+library(pROC)
 
+set.seed(714)
 plot.out.dir <- file.path(getwd(), "plots") 
 colset <- colorRampPalette(rev(brewer.pal(n=7, name = "RdYlBu")))(100)
 ```
@@ -45,9 +43,9 @@ colset <- colorRampPalette(rev(brewer.pal(n=7, name = "RdYlBu")))(100)
 This includes NA handling and correlation check between selected lab variables.
 
 ```{r}
-var_lib <- read.csv('~/Documents/GitHub/BMI714Project/BMI714_NHANES_VariableDictionary.csv')
-nhanes_2020 <- as.data.frame(fread("~/Documents/GitHub/BMI714Project/BMI714_NHANES2020_Data.csv", header = T, sep = ","))
-# nhanes_2020 <- read.csv("~/Documents/GitHub/BMI714Project/BMI714_NHANES2020_Data.csv")
+var_lib <- read.csv('BMI714_NHANES_VariableDictionary.csv')
+nhanes_2020 <- as.data.frame(fread("BMI714_NHANES2020_Data.csv", header = T, sep = ","))
+# nhanes_2020 <- read.csv("BMI714_NHANES2020_Data.csv")
 
 # the meta groups that exist within variables, I'm interested in laboratory
 table(var_lib$Component)
@@ -217,21 +215,41 @@ hep_vars <- "P_HEPBD_LBXHBC"
 analysis_ind_var_vec <- c("P_PBCD_LBDBPBSI", "P_PBCD_LBDBCDSI", "P_PBCD_LBDTHGSI", "P_PBCD_LBDBSESI", "P_PBCD_LBDBMNSI", "P_CBC_LBXHCT", "P_CBC_LBXMCVSI", "P_CBC_LBXHGB")
 analysis_var_ref <- var_lib%>%filter(BMI_714_Variable_Name %in% c(hep_vars, analysis_ind_var_vec))
 # subset the data to only include the variables of interest
-nhane_working <- nhane_sub%>%
+nhane_selected <- nhane_sub%>%
   select(all_of(c(hep_vars, analysis_ind_var_vec)))
-nhane_working
 
-nhane_working$P_HEPBD_LBXHBC <- as.factor(nhane_working$P_HEPBD_LBXHBC)
+nhane_selected$P_HEPBD_LBXHBC <- as.factor(ifelse(nhane_selected$P_HEPBD_LBXHBC == 1, 0, 1))
+nhane_selected
+
+# table(nhane_selected$P_HEPBD_LBXHBC)
 ```
-#Test-Train split
+
+### Test-train split
+
 ```{r}
-#training datasest
-nhane_working <- train(factor(P_HEPBD_LBXHBC) ~ . (or period, to use all predictors), data = dataset, method = method name)
+# since we have so many observations we can do 0.7 train prop (i'm so happy)
+train_prop <- 0.7
 
-#testing
+n <- nrow(nhane_selected)
 
+# train_indices <- sample(1:n, size = floor(train_prop * n))
+# using this protocol to ensure equal ratio of case/control in train/test
+train_indices <- createDataPartition(nhane_selected$P_HEPBD_LBXHBC, p = 0.7, list = FALSE)
 
+nhane_train <- nhane_selected[train_indices, ]   # Training set
+nhane_test <- nhane_selected[-train_indices, ]  # Test set
+
+# Check the sizes
+cat("Training set size:", nrow(nhane_train), "\n")
+cat("Test set size:", nrow(nhane_test), "\n")
+
+cat("Class proportions in training set:\n")
+print(prop.table(table(nhane_train$P_HEPBD_LBXHBC)))
+
+cat("Class proportions in test set:\n")
+print(prop.table(table(nhane_test$P_HEPBD_LBXHBC)))
 ```
+
 
 ## Model Building
 
@@ -243,21 +261,25 @@ We have 8 continuous independent variables and 1 binary dependent variable. We w
 
 ```{r}
 # fit a full model
-fit_full <- glm(P_HEPBD_LBXHBC ~ ., data = nhane_working, family = binomial)
+fit_full <- glm(P_HEPBD_LBXHBC ~ ., data = nhane_train, family = binomial)
 #summary(fit_full)   #P_PBCD_LBDBMNSI is not significant
 
 fit1_1 <- update(fit_full, . ~ . - P_PBCD_LBDBMNSI)
 summary(fit1_1)
+
+fit1_2 <- update(fit1_1, . ~ . - P_PBCD_LBDBSESI)
+summary(fit1_2)
 # all variables are p<0.05, we are done now
 ```
 
 #### Approach 2: Backward Elimination with AIC
 
 ```{r}
-fit_null <- glm(P_HEPBD_LBXHBC ~ 1, data = nhane_working, family = binomial)
-fit_bk_aic <- step(fit_full, scope = list(lower = fit_null, upper = fit_full), data = nhane_working, direction = "backward", trace = F, k = 2)
+fit_null <- glm(P_HEPBD_LBXHBC ~ 1, data = nhane_train, family = binomial)
+fit_bk_aic <- step(fit_full, scope = list(lower = fit_null, upper = fit_full), data = nhane_train, direction = "backward", trace = F, k = 2)
 summary(fit_bk_aic)
 ```
+
 #### Approach 3: Iterative Evaluation
 
 Method taken from Aparna, pseudo code below:
@@ -289,7 +311,7 @@ while (length(curr_ind_var_set) > 0) {
     formula_in <- as.formula(paste(paste(deparse(formula(fit_iter)), collapse = ""), "+", ind_var))
     
     # fit the model
-    fit <- glm(formula_in, data = nhane_working, family = binomial)
+    fit <- glm(formula_in, data = nhane_train, family = binomial)
     
     # pulls out p value of this F-test
     curr_p <- anova(fit_iter, fit)[[5]][2]
@@ -318,55 +340,115 @@ Now that we have the three models, let's compare
 
 ```{r}
 #Backward Elimination with $\\beta_1$ significance level of 0.05
-fit1_1
+summary(fit1_2)
 #Backward elimination with AIC
-fit_bk_aic
+summary(fit_bk_aic)
 #Iterative evaluation
-fit_out
+summary(fit_out)
 ```
+
+
 ```{r}
 #run anova to determine if including P_PBCD_LBDBSESI leads to 
 anova(fit_out, fit_bk_aic)
 AIC(fit_out)
 AIC(fit_bk_aic)
 ```
-Given that the p-value is > 0.05, this means that adding variable P_PBCD_LBDBSESI to the model does not explain significantly more of the unexplained variation compared to the model generated by iterative evaluation. We ran AIC between the two potential models and found that the difference in AIC score was not >=5 points, so we are not able to conclude that the model improves enough to warrant increasing its complexity. Based on these two test metrics, we decide to utilize the model with less variables for ridge regularization.
+
+Given that the p-value is > 0.05, this means that adding variable P_PBCD_LBDBSESI to the model does not explain significantly more of the unexplained variation compared to the model generated by iterative evaluation. We ran AIC between the two potential models and found that the difference in AIC score was not >=5 points, so we are not able to conclude that the model improves enough to warrant increasing its complexity. Based on these two test metrics, we decide to utilize the model with less variables for ridge regularization, which is fit_out.
 
 ```{r}
-#Ridge regularization because want to retain all covariates
-library(glmnet)
-packageVersion("glmnet")
+# Ridge regularization because want to retain all covariates
 
 #remove the variables that were dropped during variable selection
-nhane_working_two <- nhane_working%>%
-  select(-c(P_PBCD_LBDBSESI, P_PBCD_LBDBMNSI ))
+nhane_train_ridge <- nhane_train%>%
+  select(-c(P_PBCD_LBDBSESI, P_PBCD_LBDBMNSI))
+nhane_test_ridge <- nhane_test%>%
+  select(-c(P_PBCD_LBDBSESI, P_PBCD_LBDBMNSI))
 
-nhanes_matrix <- apply(nhane_working_two, 2, as.numeric)
+nhanes_matrix <- apply(nhane_train_ridge, 2, as.numeric)
 
 #set alpha to 0 for ridge
 nhanes_model_ridge <- cv.glmnet(nhanes_matrix[,!colnames(nhanes_matrix) %in% "P_HEPBD_LBXHBC"], nhanes_matrix[,"P_HEPBD_LBXHBC"], nfolds = 10, alpha = 0)
 best_lambda <- nhanes_model_ridge$lambda.min
 nhanes_final <- glmnet(nhanes_matrix[,!colnames(nhanes_matrix) %in% "P_HEPBD_LBXHBC"], nhanes_matrix[,"P_HEPBD_LBXHBC"], alpha = 0, lambda=best_lambda)
 ridge_coefficients<- coef(nhanes_final)
-
-ridge_coefficients
+ridge_coefficients_vector <- as.vector(ridge_coefficients)
+names(ridge_coefficients_vector) <- rownames(ridge_coefficients)
 ```
-```{txt}
-(Intercept)      6.987156   0.773964   9.028  < 2e-16 ***
-P_PBCD_LBDBPBSI -3.979698   0.566895  -7.020 2.22e-12 ***
-P_PBCD_LBDBCDSI -0.046711   0.007193  -6.494 8.36e-11 ***
-P_PBCD_LBDTHGSI -0.030940   0.002748 -11.258  < 2e-16 ***
-P_PBCD_LBDBSESI -0.245589   0.124850  -1.967   0.0492 *  
-P_CBC_LBXHCT    -0.226821   0.047670  -4.758 1.95e-06 ***
-P_CBC_LBXMCVSI  -0.037851   0.007706  -4.912 9.02e-07 ***
-P_CBC_LBXHGB     0.703788
+
+We now compare the coefficients from the ridge regularization to the coefficients of fit_out.
+
+```{r}
+comparison_df <- data.frame( 
+  Ridge = ridge_coefficients_vector,  
+  Standard = fit_out$coefficients[names(ridge_coefficients_vector)] 
+)
+comparison_df
 ```
 
 ```{r}
+# model eval with regular logistic regression
+predicted_probs <- predict(fit_out, newdata = nhane_test, type = "response")
+predicted_classes <- ifelse(predicted_probs > 0.5, 1, 0)
+# table(predicted_classes)
+actual_classes <- nhane_test[, "P_HEPBD_LBXHBC"]
+# table(actual_classes)
+confusion_matrix_logi <- table(Predicted = predicted_classes, Actual = actual_classes)
+roc_logi <- roc(actual_classes, predicted_probs, plot = T, print.auc = T, main = "ROC Curve for Logistic Regression")
 
+# model eval with ridge
+predicted_probs <- predict(nhanes_final, newx = as.matrix(nhane_test_ridge[, !colnames(nhane_test_ridge) %in% "P_HEPBD_LBXHBC"]), s = "lambda.min", type = "response")
+predicted_classes <- ifelse(predicted_probs > 0.5, 1, 0)
+# table(predicted_classes)
+actual_classes <- nhane_test_ridge[, "P_HEPBD_LBXHBC"]
+# table(actual_classes)
+confusion_matrix_ridge <- table(Predicted = predicted_classes, Actual = actual_classes)
+roc_logi_ridge <- roc(actual_classes, predicted_probs, plot = T, print.auc = T, main = "ROC Curve for Ridge Regression")
+```
+We now obtain the overview of metrics for the two models.
 
+```{r}
+# define a function to get metrics from confusion matrix
+calculate_metrics <- function(confusion_matrix) {
+  TN <- confusion_matrix[1, 1]
+  FP <- confusion_matrix[1, 2]
+  FN <- confusion_matrix[2, 1]
+  TP <- confusion_matrix[2, 2]
+  sensitivity <- TP / (TP + FN)
+  specificity <- TN / (TN + FP)
+
+  # return a quick list of metrics
+  return(list(
+    Sensitivity = sensitivity,
+    Specificity = specificity,
+    False_Negatives = FN,
+    False_Positives = FP
+  ))
+}
+
+```
+
+```{r}
+# perform the functinos on the confusion matrix
+metrics_logistic <- calculate_metrics(confusion_matrix_logi)
+metrics_ridge <- calculate_metrics(confusion_matrix_ridge)
+
+# make a df
+evaluation_df <- data.frame(
+  Model = c("Logistic Regression", "Ridge Regression"),
+  Sensitivity = c(metrics_logistic$Sensitivity, metrics_ridge$Sensitivity),
+  Specificity = c(metrics_logistic$Specificity, metrics_ridge$Specificity),
+  False_Negatives = c(metrics_logistic$False_Negatives, metrics_ridge$False_Negatives),
+  False_Positives = c(metrics_logistic$False_Positives, metrics_ridge$False_Positives)
+)
+
+evaluation_df
 ```
 
 
 
 
+
+
+## 
