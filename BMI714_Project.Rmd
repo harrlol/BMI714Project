@@ -34,6 +34,7 @@ library(RColorBrewer)
 library(caret)
 library(pROC)
 library(progress)
+library(rsq)
 
 plot.out.dir <- file.path(getwd(), "plots") 
 colset <- colorRampPalette(rev(brewer.pal(n=7, name = "RdYlBu")))(100)
@@ -219,14 +220,22 @@ analysis_var_ref <- var_lib%>%filter(BMI_714_Variable_Name %in% c(hep_vars, anal
 nhane_selected <- nhane_sub%>%
   select(all_of(c(hep_vars, analysis_ind_var_vec)))
 
+# we see that LBXHBC is indeed binary
+table(nhane_selected$P_HEPBD_LBXHBC)
 nhane_selected$P_HEPBD_LBXHBC <- as.factor(ifelse(nhane_selected$P_HEPBD_LBXHBC == 1, 0, 1))
 
 head(nhane_selected)
 
 cor(nhane_selected[, -1])
 plot(nhane_selected[, -1])
-
 # table(nhane_selected$P_HEPBD_LBXHBC)
+```
+We see an almost 1 correlation between P_CBC_LBXHGB and P_CBC_LBXHCT, which is expected as they are both blood cell measurements. We will drop P_CBC_LBXHGB from the analysis.
+
+```{r}
+nhane_selected <- nhane_selected%>%
+  select(-c(P_CBC_LBXHGB))
+analysis_ind_var_vec <- analysis_ind_var_vec[analysis_ind_var_vec != "P_CBC_LBXHGB"]
 ```
 
 ### Scaling
@@ -268,19 +277,22 @@ print(prop.table(table(nhane_test$P_HEPBD_LBXHBC)))
 
 ### Logistic Regression
 
-We have 8 continuous independent variables and 1 binary dependent variable. We will use logistic regression to predict the probability of having Hepatitis B core antibody based on the 8 blood test results. I am interested in investigating the performance and analyzing different approaches to feature selection. 
+We have 7 continuous independent variables and 1 binary dependent variable. We will use logistic regression to predict the probability of having Hepatitis B core antibody based on the 8 blood test results. I am interested in investigating the performance and analyzing different approaches to feature selection. 
 
 #### Approach 1: Backward Elimination with $\\beta_1$ significance level of 0.05
 
 ```{r}
 # fit a full model
 fit_full <- glm(P_HEPBD_LBXHBC ~ ., data = nhane_train, family = binomial)
-# summary(fit_full)   #P_PBCD_LBDBMNSI is not significant
+summary(fit_full)   #P_PBCD_LBDBMNSI is not significant
 
-fit1_1 <- update(fit_full, . ~ . - P_PBCD_LBDBMNSI)
-# summary(fit1_1) #P_PBCD_LBDBSESI is not significant
+fit1_1 <- update(fit_full, . ~ . - P_CBC_LBXHCT)
+summary(fit1_1) #P_PBCD_LBDBSESI is not significant
 
-fit1 <- update(fit1_1, . ~ . - P_PBCD_LBDBSESI)
+fit1_2 <- update(fit1_1, . ~ . - P_PBCD_LBDBSESI)
+summary(fit1_2)
+
+fit1 <- update(fit1_2, . ~ . - P_PBCD_LBDBMNSI)
 summary(fit1)
 # all variables are p<0.05, we are done now
 ```
@@ -364,22 +376,26 @@ summary(fit2)
 summary(fit3)
 ```
 
-Approach 1 and approach 2 agrees, while approach 3 included only 4 of the 5 heavy metal tests. We will now compare the three models using ANOVA and AIC.
-
-We note fit3 is strictly nested within fit1(=fit2). We will do an F test on the two models, and compare AIC scores.
+These three models agree with each other perfectly. We will now proceed with fit1. Just for reference, AIC for fit1 is 2944. And a quick comparison between fit1 and fit_full (model with all 7 predictors) with r squared value indeed shows that our variable selection made a significant improvement in model fit.
 
 ```{r}
-# fit3 has fewest variables, let's see if adding the dropped variable improves the model
-anova(fit3, fit1)
-AIC(fit3, fit1)
-```
-
-Adding P_CBC_LBXHCT and P_CBC_LBXHGB to fit3 does indeed significantly explain more variance in the data, fit1 also is ~30 AIC scores lower than fit3. Both evidence points to fit1 being the more statistically robust model, thus we will proceed with fit1. As a reminder, during this variable selection, we dropped P_PBCD_LBDBSESI and P_PBCD_LBDBMNSI as they did not prove to be statistically significant enough to explain the variance in the data. 
-
-```{r}
-# rational var naming
+AIC(fit3,fit2, fit1)
 fit_logi <- fit1# fit1 is the best model
+
+rsq(fit1, adj = T)
+rsq(fit_full, adj = T)
 ```
+
+Out of curiosity, what if we now add back in P_CBC_LBXHCT? Would we see any significant improvement in model fit? 
+
+```{r}
+fit_blah <- update(fit1, . ~ . + P_CBC_LBXHCT)
+summary(fit_blah)
+
+AIC(fit_blah, fit1)
+anova(fit1, fit_blah)
+```
+Ok that's comforting. Indeed, HCT does not add any significant improvement to the model.
 
 #### Ridge Regression
 
@@ -389,9 +405,9 @@ We will now perform ridge regression on the selected variables to see if we can 
 # Ridge regularization because want to retain all covariates
 # remove the variables that were dropped during variable selection
 nhane_train_ridge <- nhane_train%>%
-  select(-c(P_PBCD_LBDBSESI, P_PBCD_LBDBMNSI))
+  select(-c(P_PBCD_LBDBSESI, P_PBCD_LBDBMNSI, P_CBC_LBXHCT))
 nhane_test_ridge <- nhane_test%>%
-  select(-c(P_PBCD_LBDBSESI, P_PBCD_LBDBMNSI))
+  select(-c(P_PBCD_LBDBSESI, P_PBCD_LBDBMNSI, P_CBC_LBXHCT))
 
 nhanes_matrix <- apply(nhane_train_ridge, 2, as.numeric)
 
@@ -454,11 +470,10 @@ calculate_metrics <- function(confusion_matrix) {
     False_Positives = FP
   ))
 }
-
 ```
 
 ```{r}
-# perform the functinos on the confusion matrix
+# perform the functions on the confusion matrix
 metrics_logistic <- calculate_metrics(confusion_matrix_logi)
 metrics_ridge <- calculate_metrics(confusion_matrix_ridge)
 
@@ -483,7 +498,7 @@ First define a function that takes in a model and outputs coefficients as requir
 ```{r}
 # create the data pool for bootstrapping
 bs_dat <- nhane_train%>%
-  select(-c(P_PBCD_LBDBSESI, P_PBCD_LBDBMNSI))
+  select(-c(P_PBCD_LBDBSESI, P_PBCD_LBDBMNSI, P_CBC_LBXHCT))
 
 x <- model.matrix(P_HEPBD_LBXHBC ~ ., data = bs_dat)[, -1]
 y <- as.numeric(bs_dat$P_HEPBD_LBXHBC) - 1
@@ -493,7 +508,7 @@ pb <- progress_bar$new(total = 1001)
 ridge_boot_fn <- function(in_dat, idx) {
   pb$tick()  
   # get the bootstrap sample
-  x_boot <- in_dat[idx, 2:7]
+  x_boot <- in_dat[idx, 2:5]
   y_boot <- in_dat[idx, 1]
   
   # edge case where y is all the same
@@ -511,6 +526,7 @@ ridge_boot_fn <- function(in_dat, idx) {
   # get coefficients
   return(as.numeric(coef(fit_ridge)))
 }
+
 
 # perform boot
 data_list <- list(x = x, y = y)
